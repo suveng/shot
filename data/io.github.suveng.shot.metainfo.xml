@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.suveng.shot</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Shot</name>
+  <summary>Screenshot with inline annotation on GNOME</summary>
+
+  <description>
+    <p>
+      Shot captures the screen through the XDG desktop portal and opens a single
+      frozen-view window: drag to select a region, annotate it with arrows,
+      boxes, freehand strokes, text or a mosaic brush, then press Enter to copy
+      the result and save it.
+    </p>
+    <p>
+      Screenshots are saved per application: Pictures/截图/&lt;app&gt;/.
+    </p>
+    <ul>
+      <li>Single-window flow, no dialogs, no second editor</li>
+      <li>Arrows, rectangles, freehand, text and mosaic</li>
+      <li>Copy and save in one keystroke</li>
+      <li>Per-application folders</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.suveng.shot.desktop</launchable>
+  <provides><binary>shot</binary></provides>
+
+  <categories>
+    <category>Graphics</category>
+    
+  </categories>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-11-25"/>
+  </releases>
+
+  <url type="homepage">https://github.com/suveng/shot</url>
+  <url type="bugtracker">https://github.com/suveng/shot/issues</url>
+  <developer id="io.github.suveng">
+    <name>suveng</name>
+  </developer>
+</component>

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Shot
+GenericName=Screenshot Tool
+Comment=截图并标注，按应用分目录保存
+Exec=@bindir@/shot
+Icon=io.github.suveng.shot
+Categories=Graphics;
+Terminal=false
+Type=Application
+
+Keywords=screenshot;capture;annotate;截图;标注;
+StartupNotify=true

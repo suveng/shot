@@ -1,0 +1,40 @@
+name: shot-screenshot
+adopt-info: shot
+base: core26
+summary: 截图 + 标注，单窗口完成，按应用分目录保存
+description: |
+  Shot 通过 XDG desktop portal 抓屏，然后在一个「冻结画面」窗口里完成框选与标注：
+  箭头、方框、画笔、文字、马赛克。回车即复制并保存。
+
+  **功能**
+  - 单窗口流程，不弹系统框选、不开第二个编辑器
+  - 保存结构：`Pictures/截图/<软件名>/截图 YYYY-MM-DD HH-MM-SS.png`
+  - 复制走剪贴板常驻持有，本程序退出后仍可粘贴
+
+grade: stable
+confinement: strict
+
+apps:
+  shot:
+    command: usr/bin/shot
+    extensions: [gnome]
+    desktop: usr/share/applications/io.github.suveng.shot.desktop
+    plugs:
+      - desktop
+      - home
+      - wayland
+      - x11
+
+parts:
+  shot:
+    plugin: meson
+    source: .
+    parse-info: [usr/share/metainfo/io.github.suveng.shot.metainfo.xml]
+    meson-parameters:
+      - --prefix=/usr
+    override-build: |
+      craftctl default
+    build-packages:
+      - libgtk-4-dev
+    stage-packages:
+      - wl-clipboard
