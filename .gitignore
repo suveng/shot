@@ -1,2 +1,7 @@
 build/
 *.snap
+parts/
+prime/
+stage/
+overlay/
+snapcraft-*.txt

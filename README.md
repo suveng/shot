@@ -17,9 +17,10 @@ sudo meson install -C build
 ```bash
 shot            # 抓屏并进入标注界面
 shot --smoke    # 自检：自动截图 + 画一条箭头 + 保存（1.2 秒后自动提交）
+shot --test-dbl # 自检：验证双击判定（选区外/第一次/第二次）
 ```
 
-快捷键：`Esc` 取消 · `Enter`/`Ctrl+C` 复制+保存 · `Ctrl+S` 只保存 · `Ctrl+Z` 撤销 · `1..5` 箭头/方框/画笔/文字/马赛克 · `c` 换色
+快捷键：**双击选区 = 复制+保存** · `Esc` 取消 · `Enter`/`Ctrl+C` 复制+保存 · `Ctrl+S` 只保存 · `Ctrl+Z` 撤销 · `1..5` 箭头/方框/画笔/文字/马赛克 · `c` 换色
 
 保存路径：`<Pictures>/截图/<软件名>/截图 YYYY-MM-DD HH-MM-SS.png`，可用
 `~/.config/shot/config.ini` 覆盖：

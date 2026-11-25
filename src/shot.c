@@ -12,6 +12,16 @@
 #include <string.h>
 
 #define APP_ID "io.github.suveng.shot"
+
+/* snap 的 AppArmor 只给 StatusNotifierItem 这类名字 `dbus (bind)` 权限，GtkApplication
+ * 默认会 RequestName 占一个 well-known name，于是启动直接死在
+ * `Connection is not allowed to own the service ... due to AppArmor policy`。
+ * 而且 `g_application_id_is_valid("shot-screenshot")` == 0（无点的 id 不合法），
+ * 不能简单把 id 换成 snap 名。→ snap 里用 G_APPLICATION_NON_UNIQUE，不占名字。 */
+static gboolean in_snap(void) {
+  const char *snap = g_getenv("SNAP_INSTANCE_NAME");
+  return snap && *snap;
+}
 #define UI 30.0
 #define PAD 8.0
 
@@ -45,10 +55,17 @@ typedef struct {
   Tool tool;
   int color_i;
   int mode; /* 0 idle, 1 selecting, 2 drawing */
+  gboolean press_used;      /* 本次按下被工具栏/取色点消费，不再当双击 */
+  gboolean press_moved;     /* 按下后是否拖动过（判定“点击” vs “拖”）*/
+  double press_x, press_y;
+  double last_click_x, last_click_y;
+  gint64 last_click_us;
+  gboolean has_last_click;
   Ann *preview;
   char *app_name;
   char *parent;
   gboolean smoke;
+  gboolean test_dbl;   /* --test-dbl：自检双击判定（不进真实手势） */
 } Shot;
 
 static const char *COLORS[] = {"#ff3b30", "#ffcc00", "#34c759", "#0a84ff", "#ffffff"};
@@ -384,8 +401,7 @@ static int buttons(Shot *s, Btn *out, int max) {
   return n;
 }
 
-static int hit_button(Shot *s, double ix, double iy) {
-  Btn b[8];
+static int hit_button(Shot *s, double ix, double iy) {  Btn b[8];
   int n = buttons(s, b, 8);
   for (int i = 0; i < n; i++)
     if (ix >= b[i].x && ix <= b[i].x + b[i].size && iy >= b[i].y &&
@@ -404,7 +420,8 @@ static void draw_toolbar(Shot *s, cairo_t *cr) {
   Btn b[8];
   int n = buttons(s, b, 8);
   double sc = s->scale > 0 ? s->scale : 1.0;
-  cairo_set_font_size(cr, 13);
+  /* 本函数在 image 坐标系下调用（外面已 translate+scale），字号按 image 单位给 */
+  cairo_set_font_size(cr, 13 / sc);
   for (int i = 0; i < n; i++) {
     cairo_set_source_rgba(cr, 0.12, 0.12, 0.14, 0.92);
     round_rect(cr, b[i].x, b[i].y, b[i].size, b[i].size, 6 / sc);
@@ -515,10 +532,18 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer us
   cairo_move_to(cr, dx0 + 6, dy0 - 7);
   cairo_show_text(cr, label);
 
+  /* 标注、预览、工具栏全都存在 image 坐标系里（to_img() 把鼠标位置换算成 image 坐标），
+   * 画到屏幕上必须套同样的 translate+scale。之前漏了这一步：2x HiDPI 下
+   * （截图 3840×2160、窗口 1920×1080、scale=0.5）标注被放大 2 倍甩到框外，
+   * 工具栏更是画到屏幕右侧外面，根本看不见。 */
+  cairo_save(cr);
+  cairo_translate(cr, s->offx, s->offy);
+  cairo_scale(cr, sc, sc);
   for (guint i = 0; i < s->anns->len; i++)
     draw_ann(s, cr, g_array_index(s->anns, Ann *, i));
   if (s->preview) draw_ann(s, cr, s->preview);
   draw_toolbar(s, cr);
+  cairo_restore(cr);
 }
 
 /* ------------------------------------------------------------ 输出 */
@@ -560,14 +585,45 @@ static void copy_clipboard(cairo_surface_t *surf) {
     g_free(tmp);
     return;
   }
-  /* wl-copy 会常驻持有剪贴板内容，本进程退出后仍可粘贴 */
-  char *cmd = g_strdup_printf("wl-copy --type image/png < '%s'", tmp);
-  g_spawn_command_line_sync(cmd, NULL, NULL, NULL, &err);
-  if (err) {
-    log_msg("wl-copy: %s", err->message);
+  /* g_spawn_command_line_sync 不经过 shell，`< file` 会被当成普通参数传给 wl-copy
+   * （结果剪贴板里是字符串 "< /tmp/shot-clip.png"，根本不是图片），
+   * 必须自己开 stdin 管道灌数据。wl-copy 会 fork 后常驻持有剪贴板，
+   * 本进程退出后仍可粘贴。 */
+  gchar *data = NULL;
+  gsize len = 0;
+  if (!g_file_get_contents(tmp, &data, &len, &err)) {
+    log_msg("read clip png: %s", err->message);
     g_clear_error(&err);
+    g_unlink(tmp);
+    g_free(tmp);
+    return;
   }
-  g_free(cmd);
+  /* 必须静默 stdout/stderr：wl-copy 会 fork 一个常驻进程持有剪贴板，
+   * 若它继承了调用者的管道，启动 shot 的终端/脚本会一直等 EOF 不返回
+   * （表现为“截图后命令卡住”，直到超时）。 */
+  GSubprocess *p = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+                                        G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+                                        G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+                                    &err,
+                                    "wl-copy", "--type", "image/png", NULL);
+  if (!p) {
+    log_msg("wl-copy spawn: %s", err->message);
+    g_clear_error(&err);
+  } else {
+    GOutputStream *in = g_subprocess_get_stdin_pipe(p);
+    if (!g_output_stream_write_all(in, data, len, NULL, NULL, &err)) {
+      log_msg("wl-copy write: %s", err->message);
+      g_clear_error(&err);
+    }
+    g_output_stream_close(in, NULL, NULL);
+    g_subprocess_wait(p, NULL, NULL);
+    if (g_subprocess_get_successful(p))
+      log_msg("clipboard: %" G_GSIZE_FORMAT " bytes -> wl-copy", len);
+    else
+      log_msg("wl-copy exit=%d", g_subprocess_get_exit_status(p));
+    g_object_unref(p);
+  }
+  g_free(data);
   g_unlink(tmp);
   g_free(tmp);
 }
@@ -583,12 +639,41 @@ static void to_img(Shot *s, double x, double y, double *ix, double *iy) {
   *iy = (y - s->offy) / s->scale;
 }
 
+/* 双击选区内 = 复制到剪贴板并保存（对齐飞书/微信截图的肌肉记忆）
+ * 用“按下→松开无位移 + 两次间隔 <400ms”自己判定，不依赖 GtkGestureClick：
+ * 那个手势会和 GtkGestureDrag 抢同一个事件序列，还会把文字工具误触成输入框。 */
+static gboolean try_double_click(Shot *s, double ix, double iy) {
+  if (!s->has_sel) return FALSE;
+  double x0, y0, x1, y1;
+  get_sel(s, &x0, &y0, &x1, &y1);
+  if (ix < x0 || ix > x1 || iy < y0 || iy > y1) return FALSE;
+  gint64 now = g_get_monotonic_time();
+  gboolean dbl = s->has_last_click && (now - s->last_click_us) <= 400000 &&
+                 fabs(ix - s->last_click_x) < 24 &&
+                 fabs(iy - s->last_click_y) < 24;
+  if (dbl) {
+    s->has_last_click = FALSE;
+    log_msg("double-click -> copy+save");
+    do_commit(s, TRUE);
+    return TRUE;
+  }
+  s->has_last_click = TRUE;
+  s->last_click_x = ix;
+  s->last_click_y = iy;
+  s->last_click_us = now;
+  return FALSE;
+}
+
 static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer user) {
   (void)g;
   Shot *s = user;
   if (s->entry) return;
   double ix, iy;
   to_img(s, x, y, &ix, &iy);
+  s->press_x = ix;
+  s->press_y = iy;
+  s->press_moved = FALSE;
+  s->press_used = FALSE;
   s->mode = 0;
   if (!s->has_sel) {
     s->mode = 1;
@@ -599,6 +684,7 @@ static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer user) 
   }
   int idx = hit_button(s, ix, iy);
   if (idx >= 0) {
+    s->press_used = TRUE;
     Btn b[8];
     buttons(s, b, 8);
     if (b[idx].kind == K_TOOL) {
@@ -623,6 +709,7 @@ static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer user) 
       for (int i = 0; i < NCOLORS; i++) {
         double cx = b[0].x + i * b[0].size * 0.75;
         if (fabs(ix - cx) <= b[0].size * 0.3) {
+          s->press_used = TRUE;
           s->color_i = i;
           queue_draw(s);
           return;
@@ -649,7 +736,9 @@ static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer user) 
   GdkRGBA c;
   gdk_rgba_parse(&c, COLORS[s->color_i]);
   s->mode = 2;
-  s->preview = ann_new(s->tool, &c, 3, ix, iy);
+  /* 线宽用 image 单位：3 个逻辑像素 = 3/scale 个 image 像素，
+   * 保证屏幕预览与落盘 PNG 视觉粗细一致 */
+  s->preview = ann_new(s->tool, &c, 3.0 / (s->scale > 0 ? s->scale : 1.0), ix, iy);
 }
 
 static void on_drag_update(GtkGestureDrag *g, double ox, double oy, gpointer user) {
@@ -658,6 +747,10 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy, gpointer use
   gtk_gesture_drag_get_start_point(g, &sx, &sy);
   double ix, iy;
   to_img(s, sx + ox, sy + oy, &ix, &iy);
+  if (s->press_moved == FALSE) {
+    double dx = ix - s->press_x, dy = iy - s->press_y;
+    if (dx * dx + dy * dy > 16) s->press_moved = TRUE; /* >4 image px 算拖拽 */
+  }
   if (s->mode == 1) {
     s->sx1 = ix;
     s->sy1 = iy;
@@ -678,8 +771,14 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy, gpointer use
 }
 
 static void on_drag_end(GtkGestureDrag *g, double ox, double oy, gpointer user) {
-  (void)g; (void)ox; (void)oy;
   Shot *s = user;
+  /* 没拖动、也没点到工具栏/取色点 → 这是一次单击，交给双击判定 */
+  if (!s->press_moved && !s->press_used) {
+    double sx, sy, ix, iy;
+    gtk_gesture_drag_get_start_point(g, &sx, &sy);
+    to_img(s, sx + ox, sy + oy, &ix, &iy);
+    if (try_double_click(s, ix, iy)) return; /* 双击已提交并退出 */
+  }
   if (s->mode == 2 && s->preview) {
     if (s->preview->pts->len > 1) {
       /* 越界裁剪到选区 */
@@ -874,6 +973,17 @@ static gboolean capture_idle(gpointer user) {
   s->ih = cairo_image_surface_get_height(s->img);
   queue_draw(s);
 
+  if (s->test_dbl) {
+    s->has_sel = TRUE;
+    s->sx0 = 200; s->sy0 = 200; s->sx1 = 1400; s->sy1 = 900;
+    /* 选区外点击：不该记入双击 */
+    gboolean outside = try_double_click(s, 10, 10);
+    /* 选区内第一次：只记录；第二次（同一位置、间隔 <400ms）：应提交 */
+    gboolean first = try_double_click(s, 600, 500);
+    gboolean second = try_double_click(s, 600, 500);
+    log_msg("test-dbl outside=%d first=%d second=%d", outside, first, second);
+    return G_SOURCE_REMOVE;
+  }
   if (s->smoke) {
     s->has_sel = TRUE;
     s->sx0 = 200; s->sy0 = 200; s->sx1 = 1400; s->sy1 = 900;
@@ -906,14 +1016,20 @@ int main(int argc, char **argv) {
   gboolean smoke = FALSE;
   for (int i = 1; i < argc; i++)
     if (g_strcmp0(argv[i], "--smoke") == 0) smoke = TRUE;
+  gboolean test_dbl = FALSE;
+  for (int i = 1; i < argc; i++)
+    if (g_strcmp0(argv[i], "--test-dbl") == 0) test_dbl = TRUE;
 
   Shot *s = g_new0(Shot, 1);
   s->anns = g_array_new(FALSE, FALSE, sizeof(Ann *));
   s->tool = T_ARROW;
   s->smoke = smoke;
+  s->test_dbl = test_dbl;
   s->app_name = focused_app();
 
-  GtkApplication *app = gtk_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
+  GtkApplication *app = gtk_application_new(
+      APP_ID, G_APPLICATION_DEFAULT_FLAGS |
+                  (in_snap() ? G_APPLICATION_NON_UNIQUE : 0));
   s->app = app;
   g_signal_connect(app, "activate", G_CALLBACK(on_activate), s);
 

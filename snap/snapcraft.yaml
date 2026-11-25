@@ -1,7 +1,13 @@
 name: shot-screenshot
+title: Shot
 adopt-info: shot
 base: core26
 summary: 截图 + 标注，单窗口完成，按应用分目录保存
+license: GPL-3.0-or-later
+website: https://github.com/suveng/shot
+contact: https://github.com/suveng/shot/issues
+issues: https://github.com/suveng/shot/issues
+source-code: https://github.com/suveng/shot
 description: |
   Shot 通过 XDG desktop portal 抓屏，然后在一个「冻结画面」窗口里完成框选与标注：
   箭头、方框、画笔、文字、马赛克。回车即复制并保存。
