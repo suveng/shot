@@ -66,6 +66,7 @@ typedef struct {
   char *parent;
   gboolean smoke;
   gboolean test_dbl;   /* --test-dbl：自检双击判定（不进真实手势） */
+  char *demo_bg;       /* --demo-bg FILE：不抓屏，用给定图片当冻结画面（做商店截图/演示） */
 } Shot;
 
 static const char *COLORS[] = {"#ff3b30", "#ffcc00", "#34c759", "#0a84ff", "#ffffff"};
@@ -915,6 +916,7 @@ static void shot_free(Shot *s) {
   if (s->img) cairo_surface_destroy(s->img);
   g_free(s->app_name);
   g_free(s->parent);
+  g_free(s->demo_bg);
   g_free(s);
 }
 
@@ -945,6 +947,21 @@ static void on_activate(GtkApplication *app, gpointer user) {
   g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key), s);
   gtk_widget_add_controller(s->win, keys);
 
+  if (s->demo_bg) {
+    /* 演示模式要能在没有窗口管理器的环境（Xvfb）里出图，fullscreen 请求没人处理，
+     * 所以直接把窗口设成背景图尺寸。 */
+    gint dw = 0, dh = 0;
+    if (gdk_pixbuf_get_file_info(s->demo_bg, &dw, &dh)) {
+      /* 以 1920 逻辑宽为设计基准：宽图自动缩到 1920，让 s->scale 与真实 HiDPI 一致 */
+      if (dw > 1920)
+        gtk_window_set_default_size(GTK_WINDOW(s->win), 1920, dh * 1920 / dw);
+      else
+        gtk_window_set_default_size(GTK_WINDOW(s->win), dw, dh);
+    }
+    gtk_window_present(GTK_WINDOW(s->win));
+    g_idle_add(capture_idle, s);
+    return;
+  }
   gtk_window_present(GTK_WINDOW(s->win));
   gtk_window_fullscreen(GTK_WINDOW(s->win));
 
@@ -973,6 +990,34 @@ static gboolean capture_idle(gpointer user) {
   s->ih = cairo_image_surface_get_height(s->img);
   queue_draw(s);
 
+  if (s->demo_bg) {
+    /* 演示/商店截图：用给定图片代替 portal 抓屏，不碰真实屏幕内容 */
+    s->img = cairo_image_surface_create_from_png(s->demo_bg);
+    if (!s->img || cairo_surface_status(s->img) != CAIRO_STATUS_SUCCESS) {
+      log_msg("demo-bg load failed: %s", s->demo_bg);
+      g_application_quit(G_APPLICATION(s->app));
+      return G_SOURCE_REMOVE;
+    }
+    s->iw = cairo_image_surface_get_width(s->img);
+    s->ih = cairo_image_surface_get_height(s->img);
+    s->has_sel = TRUE;
+    s->sx0 = s->iw * 0.08; s->sy0 = s->ih * 0.10;
+    s->sx1 = s->iw * 0.92; s->sy1 = s->ih * 0.88;
+    GdkRGBA c;
+    double sc = s->iw / 1920.0;              /* 以 1920 宽为设计基准换算标记大小 */
+    gdk_rgba_parse(&c, "#0a84ff");           /* 框住代码块 */
+    Ann *a2 = ann_new(T_RECT, &c, 3.5 * sc, s->iw * 0.075, s->ih * 0.555);
+    Pt e2 = {s->iw * 0.925, s->ih * 0.855};
+    g_array_append_val(a2->pts, e2);
+    g_array_append_val(s->anns, a2);
+    gdk_rgba_parse(&c, "#ff3b30");           /* 从空白处指向安装输出 */
+    Ann *a1 = ann_new(T_ARROW, &c, 4 * sc, s->iw * 0.80, s->ih * 0.50);
+    Pt e1 = {s->iw * 0.56, s->ih * 0.625};
+    g_array_append_val(a1->pts, e1);
+    g_array_append_val(s->anns, a1);
+    queue_draw(s);
+    return G_SOURCE_REMOVE;
+  }
   if (s->test_dbl) {
     s->has_sel = TRUE;
     s->sx0 = 200; s->sy0 = 200; s->sx1 = 1400; s->sy1 = 900;
@@ -1017,14 +1062,18 @@ int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++)
     if (g_strcmp0(argv[i], "--smoke") == 0) smoke = TRUE;
   gboolean test_dbl = FALSE;
-  for (int i = 1; i < argc; i++)
+  const char *demo_bg = NULL;
+  for (int i = 1; i < argc; i++) {
     if (g_strcmp0(argv[i], "--test-dbl") == 0) test_dbl = TRUE;
+    if (g_strcmp0(argv[i], "--demo-bg") == 0 && i + 1 < argc) demo_bg = argv[++i];
+  }
 
   Shot *s = g_new0(Shot, 1);
   s->anns = g_array_new(FALSE, FALSE, sizeof(Ann *));
   s->tool = T_ARROW;
   s->smoke = smoke;
   s->test_dbl = test_dbl;
+  s->demo_bg = g_strdup(demo_bg);
   s->app_name = focused_app();
 
   GtkApplication *app = gtk_application_new(
